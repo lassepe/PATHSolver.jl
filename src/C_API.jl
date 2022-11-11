@@ -89,7 +89,11 @@ function c_api_Options_Create()
 end
 
 function c_api_Options_Destroy(o::Options)
-    return ccall((:Options_Destroy, PATH_SOLVER), Cvoid, (Ptr{Cvoid},), o)
+    if o.ptr === C_NULL
+        return
+    end
+    ccall((:Options_Destroy, PATH_SOLVER), Cvoid, (Ptr{Cvoid},), o)
+    return
 end
 
 function c_api_Options_Default(o::Options)
@@ -356,6 +360,18 @@ function c_api_MCP_Destroy(m::MCP)
     return
 end
 
+function c_api_Path_Create(maxSize, maxNNZ)
+    ccall((:Path_Create, PATH_SOLVER), Ptr{Cvoid}, (Cint, Cint), maxSize, maxNNZ)
+end
+
+function c_api_Path_Reference()
+    ccall((:Path_Reference, PATH_SOLVER), Ptr{Cvoid}, ())
+end
+
+function c_api_Path_Destroy()
+    ccall((:Path_Destroy, PATH_SOLVER), Cvoid, ())
+end
+
 function c_api_MCP_SetInterface(m::MCP, interface::MCP_Interface)
     ccall(
         (:MCP_SetInterface, PATH_SOLVER),
@@ -369,6 +385,7 @@ end
 
 function c_api_MCP_GetX(m::MCP)
     ptr = ccall((:MCP_GetX, PATH_SOLVER), Ptr{Cdouble}, (Ptr{Cvoid},), m)
+    @assert ptr !== C_NULL
     return copy(unsafe_wrap(Array{Cdouble}, ptr, m.n))
 end
 
@@ -585,25 +602,11 @@ function solve_mcp(
         if dnnz > typemax(Cint)
             return MCP_Error, nothing, nothing
         end
-        nnz = Int(dnnz + 1)
+        nnz = Int(dnnz)
 
         o = c_api_Options_Create()
         c_api_Path_AddOptions(o)
         c_api_Options_Default(o)
-        m = c_api_MCP_Create(n, nnz)
-        m.id_data = InterfaceData(
-            Cint(n),
-            Cint(nnz),
-            F,
-            J,
-            lb,
-            ub,
-            z,
-            variable_names,
-            constraint_names,
-        )
-        m_interface = MCP_Interface(m.id_data)
-        c_api_MCP_SetInterface(m, m_interface)
         if length(kwargs) > 0
             mktemp() do path, io
                 println(
@@ -618,11 +621,29 @@ function solve_mcp(
             end
         end
         c_api_Options_Display(o)
+        c_api_Path_Create(n, nnz)
+        c_api_Path_Reference()
+
+        m = c_api_MCP_Create(n, nnz)
+        m.id_data = InterfaceData(
+            Cint(n),
+            Cint(nnz),
+            F,
+            J,
+            lb,
+            ub,
+            z,
+            variable_names,
+            constraint_names,
+        )
+        m_interface = MCP_Interface(m.id_data)
+        c_api_MCP_SetInterface(m, m_interface)
         info = Information(;
             generate_output = generate_output,
             use_start = use_start,
             use_basics = use_basics,
         )
+
         status = c_api_Path_Solve(m, info)
     end  # GC.@preserve
     X = c_api_MCP_GetX(m)
@@ -632,6 +653,10 @@ function solve_mcp(
     # PATH side? i.e., MCP_Destroy before other things?
     c_api_MCP_Destroy(m)
     m.ptr = C_NULL
+    c_api_Options_Destroy(o)
+    o.ptr = C_NULL
+    c_api_Path_Destroy()
+
     return MCP_Termination(status), X, info
 end
 
